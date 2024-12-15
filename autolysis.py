@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-AIPROXY_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIzZjIwMDU1OTdAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.mGtFocaNamOEpoh3Y6WUB-xoAJJzW3EQntzLwbHUSXg"
+AIPROXY_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIzZjEwMDI3ODNAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.PB7VDPxXTC6SpA8Ev4K-744mPxQd6Hvpz_qnFGjJ1BM"
 
 OPENAI_API_BASE = "https://aiproxy.sanand.workers.dev/openai/v1"
 MODEL_NAME = "gpt-4o-mini"
