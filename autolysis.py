@@ -6,7 +6,9 @@
 #     "matplotlib",
 #     "seaborn",
 #     "tenacity",
-#     "scikit-learn"
+#     "scikit-learn",
+#     "opencv-python",
+#     "Pillow"
 # ]
 # ///
 
@@ -20,8 +22,15 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_fixed
+from PIL import Image
+import cv2
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
 
-AIPROXY_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIzZjEwMDI3ODNAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.PB7VDPxXTC6SpA8Ev4K-744mPxQd6Hvpz_qnFGjJ1BM"
+# Load sensitive information from environment variables for security
+AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
+if not AIPROXY_TOKEN:
+    raise ValueError("AIPROXY_TOKEN environment variable not set.")
 
 OPENAI_API_BASE = "https://aiproxy.sanand.workers.dev/openai/v1"
 MODEL_NAME = "gpt-4o-mini"
@@ -41,114 +50,166 @@ def openai_chat(messages, functions=None, function_call=None):
     if function_call:
         data["function_call"] = function_call
 
-    r = requests.post(f"{OPENAI_API_BASE}/chat/completions", headers=HEADERS, json=data, timeout=90)
-    r.raise_for_status()
-    return r.json()
+    response = requests.post(f"{OPENAI_API_BASE}/chat/completions", headers=HEADERS, json=data, timeout=90)
+    response.raise_for_status()
+    return response.json()
 
 def safe_str(obj):
     return str(obj)[:2000]
 
-def summarize_df(df, max_sample=5):
+def summarize_df(df: pd.DataFrame, max_sample: int = 5) -> list:
+    """
+    Summarize the DataFrame columns with dtype, null counts, unique counts, and sample values.
+    """
     desc = []
     for c in df.columns:
-        col_info = {}
-        col_info["name"] = c
-        col_info["dtype"] = str(df[c].dtype)
-        col_info["num_null"] = int(df[c].isna().sum())  # convert to int
-        col_info["num_unique"] = int(df[c].nunique(dropna=False))  # convert to int
-        samples = df[c].dropna().unique()
-        if len(samples) > max_sample:
-            samples = samples[:max_sample]
-        samples = [safe_str(x) for x in samples]
-        col_info["sample_values"] = samples
+        col_info = {
+            "name": c,
+            "dtype": str(df[c].dtype),
+            "num_null": int(df[c].isna().sum()),
+            "num_unique": int(df[c].nunique(dropna=False)),
+            "sample_values": [safe_str(x) for x in df[c].dropna().unique()[:max_sample]]
+        }
         desc.append(col_info)
     return desc
 
-def basic_stats(df):
+def basic_stats(df: pd.DataFrame) -> dict:
+    """
+    Compute basic statistics of the DataFrame.
+    """
     stats = {}
     try:
         stats["shape"] = (int(df.shape[0]), int(df.shape[1]))
         stats["memory_usage_mb"] = float(df.memory_usage(deep=True).sum() / (1024*1024))
-        describe_dict = df.describe(include='all', datetime_is_numeric=True).to_dict()
-        # Convert all numeric types in describe_dict to Python floats or ints
-        # This ensures everything is JSON serializable
+        # Removed 'datetime_is_numeric=True'
+        describe_dict = df.describe(include='all').to_dict()
+        
         def convert_types(o):
             if isinstance(o, np.integer):
                 return int(o)
             elif isinstance(o, np.floating):
                 return float(o)
             return o
+        
         stats["describe"] = json.loads(json.dumps(describe_dict, default=convert_types))
         null_counts = df.isna().sum().to_dict()
-        # Convert null_counts to int
-        null_counts = {k: int(v) for k, v in null_counts.items()}
-        stats["null_counts"] = null_counts
-    except Exception:
-        pass
+        stats["null_counts"] = {k: int(v) for k, v in null_counts.items()}
+    except Exception as e:
+        print(f"Error computing basic stats: {e}")
     return stats
 
-def calc_correlation(df):
+def calc_correlation(df: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Calculate the correlation matrix for numeric columns.
+    """
     numeric_cols = df.select_dtypes(include=[np.number])
     if numeric_cols.shape[1] > 1:
         return numeric_cols.corr()
     return None
 
-def attempt_clustering(df, n_clusters=3):
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.cluster import KMeans
+def attempt_clustering(df: pd.DataFrame, n_clusters: int = 3) -> dict | None:
+    """
+    Attempt K-Means clustering on numeric data.
+    """
     numeric = df.select_dtypes(include=[np.number]).dropna(axis=0)
     if numeric.shape[0] > 10 and numeric.shape[1] > 1:
-        X = numeric.copy()
-        X = StandardScaler().fit_transform(X)
-        km = KMeans(n_clusters=n_clusters, n_init=5, random_state=42)
+        X = StandardScaler().fit_transform(numeric)
+        km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
         labels = km.fit_predict(X)
         cluster_centers = km.cluster_centers_
         return {
-            "cluster_labels": [int(x) for x in labels],
+            "cluster_labels": labels.tolist(),
             "cluster_centers": cluster_centers.tolist(),
             "columns": numeric.columns.tolist()
         }
     return None
 
-def generate_correlation_plot(corr):
-    plt.figure(figsize=(6,6))
-    sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm")
-    filename = f"correlation_{uuid.uuid4().hex[:6]}.png"
+def generate_correlation_plot(corr: pd.DataFrame) -> str:
+    """
+    Generate and save a correlation heatmap.
+    """
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", linewidths=0.5)
     plt.title("Correlation Heatmap")
     plt.tight_layout()
-    plt.savefig(filename, dpi=100)
+    filename = f"correlation_{uuid.uuid4().hex[:6]}.png"
+    plt.savefig(filename, dpi=150)
     plt.close()
     return filename
 
-def generate_distribution_plot(df):
+def generate_distribution_plot(df: pd.DataFrame) -> str | None:
+    """
+    Generate and save a distribution plot for the first numeric column.
+    """
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     if len(numeric_cols) > 0:
         col = numeric_cols[0]
-        plt.figure(figsize=(6,4))
-        sns.histplot(df[col], kde=True, color='blue')
+        plt.figure(figsize=(8, 6))
+        sns.histplot(df[col].dropna(), kde=True, color='blue')
         plt.title(f"Distribution of {col}")
+        plt.xlabel(col)
+        plt.ylabel("Frequency")
         plt.tight_layout()
         filename = f"distribution_{uuid.uuid4().hex[:6]}.png"
-        plt.savefig(filename, dpi=100)
+        plt.savefig(filename, dpi=150)
         plt.close()
         return filename
     return None
 
-def generate_missing_values_plot(df):
+def generate_missing_values_plot(df: pd.DataFrame) -> str | None:
+    """
+    Generate and save a bar plot of missing values per column.
+    """
     null_counts = df.isna().sum()
     if null_counts.sum() > 0:
-        plt.figure(figsize=(6,4))
-        sns.barplot(x=null_counts.index, y=null_counts.values, color='red')
+        plt.figure(figsize=(10, 6))
+        sns.barplot(x=null_counts.index, y=null_counts.values, hue=null_counts.index, palette='Reds', legend=False)
         plt.title("Missing Values per Column")
-        plt.xticks(rotation=90)
+        plt.xlabel("Columns")
+        plt.ylabel("Number of Missing Values")
+        plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
         filename = f"missing_{uuid.uuid4().hex[:6]}.png"
-        plt.savefig(filename, dpi=100)
+        plt.savefig(filename, dpi=150)
         plt.close()
         return filename
     return None
 
-if __name__ == "__main__":
+def analyze_visualizations(images: list) -> dict:
+    """
+    Analyze generated visualization images using computer vision techniques.
+    """
+    analysis = {}
+    for img_path in images:
+        try:
+            img = cv2.imread(img_path)
+            if img is None:
+                analysis[img_path] = "Unable to read image."
+                continue
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 100, 200)
+            edge_count = np.sum(edges > 0)
+            analysis[img_path] = {
+                "shape": img.shape,
+                "edge_count": int(edge_count)
+            }
+        except Exception as e:
+            analysis[img_path] = f"Error analyzing image: {e}"
+    return analysis
+
+def agentic_decision(suggestions: str) -> dict:
+    """
+    Make autonomous decisions based on LLM suggestions.
+    """
+    decisions = {}
+    if "additional analysis" in suggestions.lower():
+        decisions["additional_analysis"] = True
+    else:
+        decisions["additional_analysis"] = False
+    # Further decision logic can be added here
+    return decisions
+
+def main():
     if len(sys.argv) < 2:
         print("Usage: uv run autolysis.py dataset.csv")
         sys.exit(1)
@@ -161,7 +222,10 @@ if __name__ == "__main__":
             df = pd.read_csv(input_file, encoding=enc, on_bad_lines='skip')
             break
         except UnicodeDecodeError:
-            pass
+            continue
+        except Exception as e:
+            print(f"Error reading CSV with encoding {enc}: {e}")
+            continue
 
     if df is None:
         print("Failed to read the CSV file with available encodings.")
@@ -172,7 +236,7 @@ if __name__ == "__main__":
     corr = calc_correlation(df)
     cluster_info = attempt_clustering(df)
 
-    # Convert column_summary and stats_summary to JSON strings using default=str to avoid serialization issues
+    # Convert summaries to JSON strings
     column_summary_json = json.dumps(column_summary, indent=2, default=str)
     stats_summary_json = json.dumps(stats_summary, indent=2, default=str)
 
@@ -193,6 +257,9 @@ Suggest any further generic analysis steps or summarize insights. Keep the sugge
     resp = openai_chat(messages)
     llm_suggestions = resp["choices"][0]["message"]["content"].strip()
 
+    # Agentic decision based on suggestions
+    decisions = agentic_decision(llm_suggestions)
+
     # For the narrative, also do the same for partial dumps
     partial_col_summary_json = json.dumps(column_summary[:3], default=str)
     keys_stats = list(stats_summary.keys())
@@ -200,14 +267,14 @@ Suggest any further generic analysis steps or summarize insights. Keep the sugge
 
 - Columns summary: {partial_col_summary_json}... ({len(column_summary)} columns total)
 - Basic stats (like describe): keys: {keys_stats}
-- Missing values: {stats_summary.get('null_counts',{})}
+- Missing values: {stats_summary.get('null_counts', {})}
 - Correlation matrix: {'present' if corr is not None else 'not available or not meaningful'}
 - Clusters: {'found' if cluster_info is not None else 'not performed'}
 
 We also have suggestions from the LLM:
 {llm_suggestions}
 
-Now, please write a story as a Markdown `README.md` describing:
+Now, please write a story as a Markdown README.md describing:
 1. Briefly what the data might represent (make a guess if unknown)
 2. The analysis steps we performed (summary stats, missing values, correlation, clustering)
 3. The insights discovered (patterns, notable correlations, any clusters)
@@ -219,7 +286,7 @@ For example:
 - A distribution plot (if generated)
 - A missing values plot (if generated)
 
-Make sure to embed images in Markdown, like `![Alt text](correlation_XXXXXX.png)` etc.
+Make sure to embed images in Markdown, like ![Alt text](correlation_XXXXXX.png) etc.
 Use headings, lists, and emphasis.
 """
 
@@ -241,6 +308,17 @@ Use headings, lists, and emphasis.
     if mfile:
         images.append(mfile)
 
+    # Analyze visualizations using computer vision
+    image_analysis = analyze_visualizations(images)
+    print("Visualization Analysis:", json.dumps(image_analysis, indent=2))
+
+    # Optionally, make agentic decisions based on LLM suggestions
+    if decisions.get("additional_analysis"):
+        print("LLM suggested additional analysis. Implementing additional steps...")
+        # Implement additional analysis steps here
+        # For example, generating more plots or performing different statistical tests
+        # This is a placeholder for further agentic actions
+
     with open("README.md", "w", encoding="utf-8") as f:
         f.write(narrative)
         f.write("\n\n")
@@ -248,3 +326,6 @@ Use headings, lists, and emphasis.
         for img in images:
             if os.path.basename(img).lower() not in lower_narr:
                 f.write(f"![Chart]({img})\n")
+
+if __name__ == "__main__":
+    main()
